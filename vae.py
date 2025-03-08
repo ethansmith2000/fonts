@@ -1,14 +1,11 @@
 import torch
-from utils import detect_boxes, font_supports_all_chars, render_char
+from utils import detect_boxes, font_supports_all_chars, render_char, TimerWithMessage
 import os
 import string
 import matplotlib.font_manager as fm
 from tqdm import tqdm
 import torchvision.transforms as T
 import numpy as np
-
-
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,12 +13,6 @@ from torch.optim import Adam
 from torch.utils.data import DataLoader
 from dataloader import FontDataset
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.optim import Adam
-from torch.utils.data import DataLoader
-from dataloader import FontDataset
 
 
 class ResBlock(nn.Module):
@@ -166,7 +157,7 @@ class VAE(nn.Module):
 
 
 def train_vae(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
     #tf32 enable, matmul precision high
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -175,7 +166,8 @@ def train_vae(args):
 
     
     # Initialize dataset and dataloader
-    dataset = FontDataset()
+    with TimerWithMessage("Loading dataset...", "Dataset loading"):
+        dataset = FontDataset()
     dataloader = DataLoader(dataset, batch_size=args["batch_size"], shuffle=True)
     
     # Initialize model and optimizer
@@ -189,7 +181,8 @@ def train_vae(args):
         recon_loss = 0
         kl_loss = 0
         
-        for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}/{args['epochs']}"):
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args['epochs']}")
+        for batch in pbar:
             images = batch["image"].to(device)
             
             # Forward pass
@@ -205,13 +198,15 @@ def train_vae(args):
             loss = recon + kl * args["kl_weight"]
             
             # Backward pass
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
             
             total_loss += loss.item()
             recon_loss += recon.item()
             kl_loss += kl.item()
+
+            pbar.set_postfix(loss=loss.item(), recon=recon.item(), kl=kl.item())
         
         # Print epoch statistics
         avg_loss = total_loss / len(dataset)

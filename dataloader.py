@@ -46,14 +46,14 @@ class FontDataset(torch.utils.data.Dataset):
             example = self.dataset[idx]
             tensors = []
             for char in self.characters:
-                task = (example["font_path"], char, example["font_folder"], self.image_size, self.bg_color, self.text_color, self.fixed_font_size)
+                task = (example["font_path"], char, "dummy_folder", self.image_size, self.bg_color, self.text_color, self.fixed_font_size)
                 img, output_path = render_char(task)
                 if img is None:
                     # skip this font
                     idx = np.random.randint(0, len(self.dataset))
                     break
                 # tensor
-                img = T.ToTensor()(img)
+                img = T.ToTensor()(img.convert("L"))
                 # resize to 64x64, nearest neighbor
                 img = T.Resize(64, interpolation=T.InterpolationMode.NEAREST)(img)
                 # normalize
@@ -61,9 +61,11 @@ class FontDataset(torch.utils.data.Dataset):
                 tensors.append(img)
 
             #8x8 grid
-            grid = torch.zeros(8*64, 8*64)
+            grid = torch.zeros(1, 8*64, 8*64)
             for i, tensor in enumerate(tensors):
-                grid[i//8*64:(i//8+1)*64, i%8*64:(i%8+1)*64] = tensor
+                col = i % 8
+                row = i // 8    
+                grid[:, row*64:(row+1)*64, col*64:(col+1)*64] = tensor
 
             example = {
                 "image": grid,

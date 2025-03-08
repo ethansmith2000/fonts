@@ -4,7 +4,20 @@ import matplotlib.pyplot as plt
 from PIL import ImageFont, Image, ImageDraw
 import os
 import freetype
+import time
 
+class TimerWithMessage:
+    def __init__(self, start_message, end_message):
+        self.start_message = start_message
+        self.end_message = end_message
+
+    def __enter__(self):
+        self.start_time = time.time()
+        print(f"{self.start_message}...")
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        end_time = time.time()
+        print(f"{self.end_message} took {end_time - self.start_time:.2f} seconds")
 
 def render_glyph_with_variation(font_path, char, axis_tag="wght", steps=5):
     # Load the font face
@@ -259,7 +272,7 @@ def order_points(pts):
     
     return rect
 
-def check_angles(pts):
+def check_angles(pts, eps = 0.0001):
     """
     Check if the angles between connected sides are approximately 90 degrees.
     
@@ -276,10 +289,10 @@ def check_angles(pts):
     v4 = pts[2] - pts[3]  # bottom edge
     
     # Normalize vectors
-    v1 = v1 / np.linalg.norm(v1)
-    v2 = v2 / np.linalg.norm(v2)
-    v3 = v3 / np.linalg.norm(v3)
-    v4 = v4 / np.linalg.norm(v4)
+    v1 = v1 / (np.linalg.norm(v1) + eps)
+    v2 = v2 / (np.linalg.norm(v2) + eps)
+    v3 = v3 / (np.linalg.norm(v3) + eps)
+    v4 = v4 / (np.linalg.norm(v4) + eps)
     
     # Calculate dot products (should be close to 0 for perpendicular vectors)
     dot1 = np.abs(np.dot(v1, v2))  # top-left angle
