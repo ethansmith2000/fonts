@@ -15,7 +15,7 @@ class FontDataset(torch.utils.data.Dataset):
         print(f"Found {len(system_fonts)} fonts.")
 
 
-        characters = string.ascii_uppercase + string.ascii_lowercase + string.digits
+        self.characters = string.ascii_uppercase + string.ascii_lowercase + string.digits
 
         # Rendering parameters
         self.image_size = (128, 128)      # Image dimensions (width, height)
@@ -26,7 +26,7 @@ class FontDataset(torch.utils.data.Dataset):
         self.dataset = []
 
         for font_path in tqdm(system_fonts, desc="Checking and aggregating fonts"):
-            if not font_supports_all_chars(font_path, characters, fixed_font_size):
+            if not font_supports_all_chars(font_path, self.characters, self.fixed_font_size):
                 print(f"Skipping font: {font_path} (missing at least one glyph)")
                 continue
             
@@ -42,17 +42,32 @@ class FontDataset(torch.utils.data.Dataset):
         return len(self.dataset)
     
     def __getitem__(self, idx):
-        example = self.dataset[idx]
-        task = (example["font_path"], example["char"], example["font_folder"], self.image_size, self.bg_color, self.text_color, self.fixed_font_size)
-        img, output_path = render_char(task)
-        # tensor
-        img = T.ToTensor()(img)
-        # normalize
-        img = T.Normalize(mean=[0.5], std=[0.5])(img)
+        for i in range(10):
+            example = self.dataset[idx]
+            tensors = []
+            for char in self.characters:
+                task = (example["font_path"], char, example["font_folder"], self.image_size, self.bg_color, self.text_color, self.fixed_font_size)
+                img, output_path = render_char(task)
+                if img is None:
+                    # skip this font
+                    idx = np.random.randint(0, len(self.dataset))
+                    break
+                # tensor
+                img = T.ToTensor()(img)
+                # resize to 64x64, nearest neighbor
+                img = T.Resize(64, interpolation=T.InterpolationMode.NEAREST)(img)
+                # normalize
+                img = T.Normalize(mean=[0.5], std=[0.5])(img)
+                tensors.append(img)
 
-        example = {
-            "image": img,
-            "font_name": example["font_name"],
-        }
+            #8x8 grid
+            grid = torch.zeros(8*64, 8*64)
+            for i, tensor in enumerate(tensors):
+                grid[i//8*64:(i//8+1)*64, i%8*64:(i%8+1)*64] = tensor
 
-        return example
+            example = {
+                "image": grid,
+                "font_name": example["font_name"],
+            }
+
+            return example
