@@ -1,0 +1,6 @@
+newfonts/*
+rendered_fonts/*
+.DS_Store
+*.pyc
+*.cpython*
+newfonts
