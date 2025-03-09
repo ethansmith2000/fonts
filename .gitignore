@@ -4,3 +4,4 @@ rendered_fonts/*
 *.pyc
 *.cpython*
 newfonts
+*.zip
