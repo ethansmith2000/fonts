@@ -276,10 +276,18 @@ def train(args):
                             latents = noise_scheduler.step(pred, t, latents).prev_sample
                         
                         with torch.autocast("cuda", dtype=torch.float32):
-                            images = latents.float().detach().cpu().numpy().squeeze(1)
-                            images = (images * 127.5 + 127.5).astype(np.uint8)
-                            images = [wandb.Image(Image.fromarray(images[i])) for i in range(images.shape[0])]
-                            wandb.log({"images": images})
+                            gen_images = latents.float().detach().cpu().numpy().squeeze(1)
+                            gen_images = (gen_images * 127.5 + 127.5).astype(np.uint8)
+                            gen_images = [wandb.Image(Image.fromarray(gen_images[i])) for i in range(gen_images.shape[0])]
+                            # wandb.log({"images": gen_images})
+
+                            images_np = (images.float().squeeze(1).detach().cpu().numpy() * 127.5 + 127.5).astype(np.uint8)
+                            images_pil = [Image.fromarray(images_np[i]) for i in range(images_np.shape[0])]
+                        
+                            wandb.log({
+                                "original_images": [wandb.Image(img) for img in images_pil],
+                                "generated_images": gen_images,
+                            })
 
             global_step += 1
         
