@@ -11,7 +11,8 @@ import numpy as np
 class FontDataset(torch.utils.data.Dataset):
     def __init__(self):
         print("Discovering system fonts")
-        system_fonts = fm.findSystemFonts(fontpaths=None, fontext='ttf')
+        # system_fonts = fm.findSystemFonts(fontpaths=None, fontext='ttf')
+        system_fonts = fm.findSystemFonts(fontpaths="/home/ubuntu/fonts/newfonts", fontext='ttf')
         print(f"Found {len(system_fonts)} fonts.")
 
 

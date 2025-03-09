@@ -5,3 +5,4 @@ rendered_fonts/*
 *.cpython*
 newfonts
 *.zip
+wandb

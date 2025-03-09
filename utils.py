@@ -6,6 +6,17 @@ import os
 import freetype
 import time
 
+class Timer:
+    def __init__(self, timer_name, dict_obj):
+        self.timer_name = timer_name
+        self.dict_obj = dict_obj
+    def __enter__(self):
+        self.start_time = time.time()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.dict_obj[self.timer_name] = time.time() - self.start_time
+        
+
 class TimerWithMessage:
     def __init__(self, start_message, end_message):
         self.start_message = start_message
@@ -104,11 +115,11 @@ def render_char(task):
     
     # Create a unique filename to avoid overwriting on case-insensitive file systems.
     if char.isupper():
-        filename = f"upper_{char}.png"
+        filename = f"{char}_upper.png"
     elif char.islower():
-        filename = f"lower_{char}.png"
+        filename = f"{char}_lower.png"
     elif char.isdigit():
-        filename = f"digit_{char}.png"
+        filename = f"{char}_digit.png"
     else:
         filename = f"{ord(char)}.png"
     
@@ -239,8 +250,8 @@ def validate_rectangle(points):
     height_right = np.linalg.norm(pts[1] - pts[2])
     
     # Calculate aspect ratios to check if opposite sides have similar lengths
-    width_ratio = min(width_top, width_bottom) / max(width_top, width_bottom)
-    height_ratio = min(height_left, height_right) / max(height_left, height_right)
+    width_ratio = min(width_top, width_bottom) / max(width_top, width_bottom, 1e-6)
+    height_ratio = min(height_left, height_right) / max(height_left, height_right, 1e-6)
     
     # Check angles (using vectors and dot products)
     is_rectangular = check_angles(pts)
