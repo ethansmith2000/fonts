@@ -112,6 +112,10 @@ def render_char(task):
     # if the image is a placeholder box, remove the font folder
     if detect_boxes(img)[0] > 0:
         return (None, None)
+
+    # if the image is dark, remove the font folder
+    if is_dark(img, threshold=0.3):
+        return (None, None)
     
     # Create a unique filename to avoid overwriting on case-insensitive file systems.
     if char.isupper():
@@ -282,6 +286,34 @@ def order_points(pts):
     rect[3] = pts[np.argmax(diff)]
     
     return rect
+
+
+def is_dark(pil_image, threshold=0.3):
+    """
+    Determines if a font image is dark enough based on pixel intensity.
+    
+    Parameters:
+    - pil_image: PIL Image object containing the rendered font
+    - threshold: Float between 0 and 1. Lower values mean darker fonts will pass.
+                 For example, 0.8 means the image must be at least 20% black.
+    
+    Returns:
+    - bool: True if the font is dark enough (passes the threshold), False otherwise
+    """
+    # Convert to grayscale if it's not already
+    if pil_image.mode != 'L':
+        pil_image = pil_image.convert('L')
+    
+    # Convert to numpy array for calculations
+    img_array = np.array(pil_image)
+    
+    # Calculate mean intensity (0 = black, 255 = white)
+    mean_intensity = np.mean(img_array) / 255.0
+    
+    # Return True if the image is dark enough (mean intensity is below threshold)
+    return mean_intensity < threshold
+
+
 
 def check_angles(pts, eps = 0.0001):
     """

@@ -6,3 +6,4 @@ rendered_fonts/*
 newfonts
 *.zip
 wandb
+checkpoints

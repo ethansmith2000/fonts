@@ -17,19 +17,20 @@ class VAE(nn.Module):
                 else:
                     return nn.GroupNorm(num_groups=channels, num_channels=channels)
             norm_fn = get_group_norm
-        
-        self.initial_conv = nn.Conv2d(1, 32, kernel_size=7, stride=2, padding=3, bias=False)
-        self.bn1 = norm_fn(32)
+
+        self.initial_conv = nn.Conv2d(1, 8, kernel_size=3, padding=1, bias=True)
+        self.norm1 = norm_fn(8)
         self.relu = nn.ReLU(inplace=True)
-        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         
         # Progressive downsampling with increasing channels
-        self.enc_block1 = ResBlock(32, 64, downsample=True)     # 128x128 -> 64x64
-        self.enc_block2 = ResBlock(64, 128, downsample=True)    # 64x64 -> 32x32
-        self.enc_block3 = ResBlock(128, 256, downsample=True)   # 32x32 -> 16x16
-        self.enc_block4 = ResBlock(256, 512, downsample=True)   # 16x16 -> 8x8
-        self.enc_block5 = ResBlock(512, 768, downsample=True) # 8x8 -> 4x4 
-        self.enc_block6 = ResBlock(768, 1024, downsample=True) # 4x4 -> 2x2
+        self.enc_block1 = ResBlock(8, 16, downsample=True)     # 512x512 -> 256x256
+        self.enc_block2 = ResBlock(16, 32, downsample=True)     # 256x256 -> 128x128
+        self.enc_block3 = ResBlock(32, 64, downsample=True)    # 128x128 -> 64x64
+        self.enc_block4 = ResBlock(64, 128, downsample=True)   # 64x64 -> 32x32
+        self.enc_block5 = ResBlock(128, 256, downsample=True)   # 32x32 -> 16x16
+        self.enc_block6 = ResBlock(256, 512, downsample=True)   # 16x16 -> 8x8
+        self.enc_block7 = ResBlock(512, 768, downsample=True) # 8x8 -> 4x4 
+        self.enc_block8 = ResBlock(768, 1024, downsample=True) # 4x4 -> 2x2
 
         
         # Flatten and project to latent space
@@ -53,9 +54,7 @@ class VAE(nn.Module):
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
         self.final_conv1 = nn.Conv2d(32, 16, kernel_size=3, stride=1, padding=1)
         self.final_bn = norm_fn(16)
-        self.final_relu = nn.ReLU(inplace=True)
-        self.final_conv2 = nn.Conv2d(16, 1, kernel_size=3, stride=1, padding=1)
-        self.tanh = nn.Tanh()
+        self.final_conv2 = nn.Conv2d(16, 1, kernel_size=3, stride=1, padding=1, bias=True)
 
         # print params
         num_params = sum(p.numel() for p in self.parameters())
@@ -63,10 +62,9 @@ class VAE(nn.Module):
         
     def encode(self, x):
         # Initial layers
-        x = self.initial_conv(x)  # 512x512 -> 256x256
-        x = self.bn1(x)
+        x = self.initial_conv(x)
+        x = self.norm1(x)
         x = self.relu(x)
-        x = self.maxpool(x)       # 256x256 -> 128x128
         
         # ResBlocks
         x = self.enc_block1(x)
@@ -75,6 +73,8 @@ class VAE(nn.Module):
         x = self.enc_block4(x)
         x = self.enc_block5(x)
         x = self.enc_block6(x)
+        x = self.enc_block7(x)
+        x = self.enc_block8(x)
         
         x = self.flatten(x)
         
@@ -104,11 +104,10 @@ class VAE(nn.Module):
         x = self.upsample(x)    # 128x128 -> 256x256
         x = self.final_conv1(x)
         x = self.final_bn(x)
-        x = self.final_relu(x)
+        x = self.relu(x)
         
         x = self.upsample(x)    # 256x256 -> 512x512
         x = self.final_conv2(x)
-        x = self.tanh(x)
         
         return x
     

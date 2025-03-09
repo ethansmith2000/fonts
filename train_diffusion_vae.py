@@ -18,6 +18,7 @@ from typing import Optional, Union
 import math 
 from copy import deepcopy
 import os
+from models.encoder import Encoder
 
 def compute_loss_weighting_for_sd3(weighting_scheme: str, sigmas=None):
     """
@@ -115,29 +116,9 @@ def get_model():
                                 encoder_hid_dim=64,
                                 )
 
-    condition_mlp = nn.Sequential(
-        nn.Linear(64, 128, bias=True),
-        nn.SiLU(),
-        nn.Linear(128, 128, bias=False),
-        nn.SiLU(),
-        nn.Linear(128, 128, bias=False),
-        nn.SiLU(),
-        nn.Linear(128, 128, bias=False),
-        nn.SiLU(),
-        nn.Linear(128, 128, bias=False),
-        nn.SiLU(),
-        nn.Linear(128, 128, bias=False),
-        nn.SiLU(),
-        nn.Linear(128, 64, bias=True),
-    )
-    for name, param in condition_mlp.named_parameters():
-        if len(param.shape) > 1:
-            #xavier_uniform_
-            nn.init.xavier_uniform_(param)
-        else:
-            nn.init.zeros_(param)
+    encoder = Encoder()
     
-    unet.register_module("condition_mlp", condition_mlp)
+    unet.register_module("condition", encoder)
     total_params = sum(p.numel() for p in unet.parameters())
     print(f"Total parameters: {total_params}")
     return unet
@@ -234,12 +215,11 @@ def train(args):
 
             target = noise - images
 
-            conditions = torch.randn(bsz, 64).to(device)
             
             # Forward pass
             with torch.autocast("cuda", dtype=mp_dtype, enabled=mp_enabled):
                 with Timer("forward", times):
-                    conditions = model.condition_mlp(conditions)
+                    mu, log_var, conditions = model.condition(images)
                     pred = model(noisy_model_input, 
                                 timesteps/1000, 
                                 encoder_hidden_states=dummy_enc_states, 
@@ -255,7 +235,9 @@ def train(args):
             loss = ((pred.float() - target.float())**2).reshape(bsz, -1).mean(dim=-1) * loss_weights
             loss = loss.mean()
 
-
+            kl = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
+            loss = loss + kl * args["kl_weight"]
+            
             # Backward pass
             optimizer.zero_grad(set_to_none=True)
             with Timer("backward", times):
@@ -278,9 +260,9 @@ def train(args):
             if global_step % args["log_images_every"] == 0:
                 with torch.no_grad():
                     with torch.autocast("cuda", dtype=mp_dtype, enabled=mp_enabled):
+                        images = images[:args["sample_batch_size"]]
+                        mu, log_var, conditions = model.condition(images)
                         latents = torch.randn(args["sample_batch_size"], 1, 512, 512).to(device)
-                        conditions = torch.randn(args["sample_batch_size"], 64).to(device)
-                        conditions = model.condition_mlp(conditions)
 
                         noise_scheduler.set_timesteps(args["diffusion_steps"])
                         for i, t in enumerate(noise_scheduler.timesteps):
@@ -330,6 +312,7 @@ if __name__ == "__main__":
         compiled=True,
         sample_batch_size=16,
         diffusion_steps=100,
-        mixed_precision="fp16"
+        mixed_precision="fp16",
+        kl_weight=1e-4,
     )
     train(args)

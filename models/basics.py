@@ -20,7 +20,11 @@ class ResBlock(nn.Module):
         if norm_type == "batch":
             norm_fn = lambda channels: nn.BatchNorm2d(channels)
         elif norm_type == "group":
-            norm_fn = lambda channels: nn.GroupNorm(num_groups=norm_groups, num_channels=channels)
+            def norm_fn(channels):
+                if channels > norm_groups:
+                    return nn.GroupNorm(num_groups=norm_groups, num_channels=channels)
+                else:
+                    return nn.GroupNorm(num_groups=channels, num_channels=channels)
 
         # Main path
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, 
