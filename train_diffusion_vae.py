@@ -242,6 +242,14 @@ def train(args):
             optimizer.zero_grad(set_to_none=True)
             with Timer("backward", times):
                 scaler.scale(loss).backward()
+
+            # # Unscales the gradients of optimizer's assigned params in-place
+            # scaler.unscale_(optimizer)
+
+            # # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
+            # if args["max_norm"] is not None:
+            #     torch.nn.utils.clip_grad_norm_(model.parameters(), args["max_norm"])
+
             scaler.step(optimizer)
             scaler.update()
 
@@ -255,6 +263,7 @@ def train(args):
                 wandb.log({
                     "loss": loss.item(),
                     "lr": scheduler.get_last_lr()[0],
+                    "kl": kl.item(),
                     **times
                 })
             if global_step % args["log_images_every"] == 0:
