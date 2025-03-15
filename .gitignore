@@ -7,3 +7,6 @@ newfonts
 *.zip
 wandb
 checkpoints
+fonts_unpacked/*
+*.ttf
+*.TTF

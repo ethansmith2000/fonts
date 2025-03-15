@@ -29,13 +29,18 @@ import matplotlib.font_manager as fm
 from tqdm import tqdm
 import torchvision.transforms as T
 import numpy as np
-from glyph import load_transformer, visualize_commands, path_to_string, string_to_path, normalize_commands, open_font, process_all_glyphs
+from glyph import load_transformer, visualize_commands, path_to_string, string_to_path, normalize_commands, open_font, process_all_glyphs, is_valid_font
 import glob
 import random
 
 class FontSVGDataset(torch.utils.data.Dataset):
-    def __init__(self, font_dir='/home/ubuntu/fonts/newfonts', num_glyphs=7):
+    def __init__(self, 
+                # font_dir='/home/ubuntu/fonts/scraper/fonts_unpacked', 
+                font_dir='/home/ubuntu/fonts/newfonts/newfonts',
+                num_glyphs=7
+                ):
         self.paths = glob.glob(os.path.join(font_dir, "**", "*.ttf"), recursive=True)
+        print("found", len(self.paths), "fonts")
         self.num_glyphs = num_glyphs
         self.num_map = {
             "1": "one",
@@ -56,6 +61,11 @@ class FontSVGDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         for i in range(10):
             font = open_font(self.paths[idx])
+            # is_valid, error_message = is_valid_font(font)
+            # if not is_valid:
+            #     # print(error_message)
+            #     idx = random.randint(0, len(self.paths) - 1)
+            #     continue
             all_glyph_commands = process_all_glyphs(font)
             if all_glyph_commands is None:
                 idx = random.randint(0, len(self.paths) - 1)
@@ -163,9 +173,11 @@ def train(args):
 
 
     times = {
-        "forward": 0,
-        "backward": 0,
-        "data_load": 0,
+        "fwd": 0,
+        "bwd": 0,
+        "data": 0,
+        "tok": 0,
+        "opt": 0,
     }
 
     # Training loop
@@ -176,7 +188,7 @@ def train(args):
         for batch in pbar:
             tok = time.time()
             if tik is not None:
-                times["data_load"] = tok - tik
+                times["data"] = tok - tik
 
             glyphs = [b[0] for b in batch]
             font_names = [b[1] for b in batch]
@@ -186,7 +198,8 @@ def train(args):
             glyphs = [g for g in glyphs if len(g) <= args["max_length"]]
 
             # tokenize
-            batch = tokenizer(glyphs, return_tensors="pt", padding="longest").input_ids.to(device)
+            with Timer("tok", times):
+                batch = tokenizer(glyphs, return_tensors="pt", padding="longest").input_ids.to(device)
 
             inps = batch[:, :-1]
             targs = batch[:, 1:]
@@ -196,30 +209,31 @@ def train(args):
 
             # Forward pass
             with torch.autocast("cuda", dtype=mp_dtype, enabled=mp_enabled):
-                with Timer("forward", times):
+                with Timer("fwd", times):
                     out = model(inps, labels=targs)
                     loss = out.loss
 
             # Backward pass
             optimizer.zero_grad(set_to_none=True)
-            with Timer("backward", times):
+            with Timer("bwd", times):
                 scaler.scale(loss).backward()
 
             # # Unscales the gradients of optimizer's assigned params in-place
             # scaler.unscale_(optimizer)
 
             # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
-            grad_norm = 0
-            if args["max_norm"] is not None:
-                grad_norm = grad_clip(model.parameters(), args["max_norm"])
+            with Timer("opt", times):
+                grad_norm = 0
+                if args["max_norm"] is not None:
+                    grad_norm = grad_clip(model.parameters(), args["max_norm"])
 
-            scaler.step(optimizer)
-            scaler.update()
+                scaler.step(optimizer)
+                scaler.update()
 
-            # scheduler step
-            scheduler.step()
+                # scheduler step
+                scheduler.step()
 
-            pbar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0], grad_norm=grad_norm.item(), **times)
+            pbar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0], grd=grad_norm.item(), **times)
             tik = time.time()
 
             if args["use_wandb"]:
@@ -241,7 +255,7 @@ def train(args):
                         out = out.detach().cpu().numpy()
                         out = tokenizer.batch_decode(out, skip_special_tokens=True)
 
-                        import pdb; pdb.set_trace()
+                        # import pdb; pdb.set_trace()
 
                         # for each sequence, just get the first letter, trim at [SEP]
                         out = [o.split("[SEP]")[0] for o in out if "[SEP]" in o]
@@ -278,11 +292,11 @@ if __name__ == "__main__":
         epochs=300,
         warmup_steps=100,
         batch_size=60,
-        learning_rate=1.0e-4,
+        learning_rate=2.0e-4,
         weight_decay=0.01,
         betas=(0.92, 0.989),
         max_norm=1.0,
-        freeze_backbone=False,
+        freeze_backbone=True,
         mixed_precision="fp16",
 
         use_wandb=True,
@@ -291,9 +305,9 @@ if __name__ == "__main__":
         save_every=1000,
         save_optimizer=False,
 
-        # load_checkpoint=None,
-        load_checkpoint="/home/ubuntu/fonts/checkpoints/step_10000.pt",
-        compile_optimizer=False,
+        load_checkpoint=None,
+        # load_checkpoint="/home/ubuntu/fonts/checkpoints/step_10000.pt",
+        compile_optimizer=True,
         compiled=False,
         compile_dynamic=True,
         max_length=11_500,

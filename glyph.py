@@ -43,8 +43,37 @@ def check_font_have_char(font, char, cmap=None):
     glyph_set = font.getGlyphSet()
     if cmap is None:
         cmap = font.getBestCmap()
+    if cmap is None:
+        return False
     glyph_name = cmap.get(char_code)
     return glyph_name and glyph_name in glyph_set
+
+
+def is_valid_font(font):
+    """
+    Check if a font file is valid and has all required attributes.
+    Returns (bool, str) tuple of (is_valid, error_message)
+    """
+    try:
+        # Check if font has a character map
+        if not hasattr(font, 'getBestCmap') or font.getBestCmap() is None:
+            return False, "Font missing character map"
+
+        # Check for valid advance widths (avoid huge/negative values)
+        # Typical advance widths are usually between 0-3000 units
+        MAX_ADVANCE_WIDTH = 5000
+        for glyph_name in font.getGlyphNames():
+            if hasattr(font, 'getGlyphSet'):
+                glyph_set = font.getGlyphSet()
+                if glyph_name in glyph_set:
+                    glyph = glyph_set[glyph_name]
+                    if hasattr(glyph, 'width') and glyph.width > MAX_ADVANCE_WIDTH:
+                        return False, f"Invalid advance width in glyph '{glyph_name}'"
+
+        return True, "Font is valid"
+
+    except Exception as e:
+        return False, f"Font validation error: {str(e)}"
 
 
 def open_font(font_path):
