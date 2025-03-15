@@ -7,13 +7,21 @@ import freetype
 import time
 
 class Timer:
-    def __init__(self, timer_name, dict_obj):
+    def __init__(self, timer_name, dict_obj, enable=True):
         self.timer_name = timer_name
         self.dict_obj = dict_obj
+        self.enable = enable
+
     def __enter__(self):
+        if not self.enable:
+            return
+
         self.start_time = time.time()
 
     def __exit__(self, exc_type, exc_value, traceback):
+        if not self.enable:
+            return
+
         self.dict_obj[self.timer_name] = time.time() - self.start_time
         
 
