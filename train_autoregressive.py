@@ -311,12 +311,12 @@ def train(args):
                 pbar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0], grd=grad_norm.item(), **times)
                 tik = time.time()
 
-                # if args["use_wandb"]:
-                #     wandb.log({
-                #         "loss": loss.item(),
-                #         "lr": scheduler.get_last_lr()[0],
-                #         **times
-                #     })
+                if args["use_wandb"]:
+                    wandb.log({
+                        "loss": loss.item(),
+                        "lr": scheduler.get_last_lr()[0],
+                        **times
+                    })
 
             if global_step % args["log_images_every"] == 0:
                 with torch.no_grad():
