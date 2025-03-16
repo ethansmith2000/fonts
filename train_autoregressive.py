@@ -322,7 +322,7 @@ def train(args):
                         char = char_list[start_idx]
                         toks = tokenizer(" " + char, return_tensors="pt").input_ids.to(device)
                         toks = toks.repeat(args["sample_batch_size"], 1)
-                        out = model.generate(toks, max_new_tokens=500)
+                        out = model.generate(toks, max_new_tokens=500, do_sample=True, top_p=0.95, top_k=20)
                         out = out.detach().cpu().numpy()
                         out = tokenizer.batch_decode(out, skip_special_tokens=True)
 
@@ -361,7 +361,7 @@ if __name__ == "__main__":
         epochs=300,
         warmup_steps=100,
         batch_size=60,
-        learning_rate=2.5e-4,
+        learning_rate=1.0e-4,
         weight_decay=0.01,
         betas=(0.92, 0.989),
         max_norm=1.0,
@@ -375,7 +375,7 @@ if __name__ == "__main__":
         save_optimizer=False,
 
         # load_checkpoint=None,
-        load_checkpoint="/home/ubuntu/fonts/checkpoints/step_2000.pt",
+        load_checkpoint="/home/ubuntu/fonts/checkpoints/step_10000.pt",
         compile_optimizer=True,
         compiled=True,
         compile_dynamic=True,
