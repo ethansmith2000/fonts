@@ -35,8 +35,8 @@ import random
 
 class FontSVGDataset(torch.utils.data.Dataset):
     def __init__(self, 
-                # font_dir='/home/ubuntu/fonts/scraper/fonts_unpacked', 
-                font_dir='/home/ubuntu/fonts/newfonts/newfonts',
+                font_dir='/home/ubuntu/fonts/scraper/fonts_unpacked', 
+                # font_dir='/home/ubuntu/fonts/newfonts/newfonts',
                 num_glyphs=7
                 ):
         self.paths = glob.glob(os.path.join(font_dir, "**", "*.ttf"), recursive=True)
@@ -278,12 +278,8 @@ def train(args):
 
                     else:
                         # Use the smoothed targets for loss calculation
-                        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), 
-                                                targs_one_hot.view(-1, targs_one_hot.size(-1)),
-                                                ignore_index=260)
+                        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targs.reshape(-1),ignore_index=260)
 
-
-                    # loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targs.view(-1), ignore_index=260)
 
             # Backward pass
             with Timer("bwd", times):
@@ -365,12 +361,12 @@ if __name__ == "__main__":
         epochs=300,
         warmup_steps=100,
         batch_size=60,
-        learning_rate=1.0e-4,
+        learning_rate=2.5e-4,
         weight_decay=0.01,
         betas=(0.92, 0.989),
         max_norm=1.0,
         freeze_backbone=False,
-        mixed_precision="bf16",
+        mixed_precision="fp16",
 
         use_wandb=True,
         log_images_every=100,
@@ -379,15 +375,15 @@ if __name__ == "__main__":
         save_optimizer=False,
 
         # load_checkpoint=None,
-        load_checkpoint="/home/ubuntu/fonts/checkpoints/step_500.pt",
+        load_checkpoint="/home/ubuntu/fonts/checkpoints/step_2000.pt",
         compile_optimizer=True,
-        compiled=False,
+        compiled=True,
         compile_dynamic=True,
         max_length=11_500,
         num_glyphs=7,
         pos_emb_len=3072,
 
-        label_smoothing=True,
+        label_smoothing=False,
         label_smoothing_sigma=1.0,
         label_smoothing_window_size=5,
     )

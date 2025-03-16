@@ -80,19 +80,34 @@ def open_font(font_path):
     font = TTFont(font_path)   
     return font
 
-def process_all_glyphs(font, chars_to_process = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?"): 
-    cmap = font.getBestCmap()
-    results = {}
+# def process_all_glyphs(font, chars_to_process = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?"): 
+#     cmap = font.getBestCmap()
+#     results = {}
     
-    for char in chars_to_process:
-        if check_font_have_char(font, char, cmap):
-            results[char] = extract_glyph_commands(font, char, cmap)
-        else:
-            # print(f"Glyph '{char}' not found in font")
-            return None
+#     for char in chars_to_process:
+#         if check_font_have_char(font, char, cmap):
+#             results[char] = extract_glyph_commands(font, char, cmap)
+#         else:
+#             # print(f"Glyph '{char}' not found in font")
+#             return None
 
-    font.close()
-    return results
+#     font.close()
+#     return results
+
+
+def process_all_glyphs(font, chars_to_process = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?"): 
+    try:
+        cmap = font.getBestCmap()
+        results = {}
+        
+        for char in chars_to_process:
+            results[char] = extract_glyph_commands(font, char, cmap)
+        font.close()
+        return results
+    except Exception as e:
+        # print(f"Error processing glyphs: {e}")
+        font.close()
+        return None
 
 
 def visualize_commands(commands, title=None, show=True):
