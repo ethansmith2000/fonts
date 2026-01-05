@@ -18,6 +18,7 @@ from typing import Optional, Union
 import math 
 from copy import deepcopy
 import os
+from accelerate import Accelerator
 
 def compute_loss_weighting_for_sd3(weighting_scheme: str, sigmas=None):
     """
@@ -144,7 +145,9 @@ def get_model():
 
 
 def train(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    mp_mode = args.get("mixed_precision") or "no"
+    accelerator = Accelerator(mixed_precision=mp_mode)
+    device = accelerator.device
     
     # Initialize dataset and dataloader
     dataset_cls = FontImageDataset if args["pre_rendered"] else FontDataset
@@ -152,7 +155,8 @@ def train(args):
         dataset = dataset_cls()
     dataloader = DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=10, pin_memory=True)
 
-    if args["use_wandb"]:
+    use_wandb = args["use_wandb"] and accelerator.is_main_process
+    if use_wandb:
         wandb.init(project="fonts-vae", config=args)
     
     # Initialize model and optimizer
@@ -185,6 +189,10 @@ def train(args):
         lr_lambda=lambda step: get_lr_lambda(step, warmup_steps, total_steps)
     )
 
+    model, optimizer, dataloader, scheduler = accelerator.prepare(
+        model, optimizer, dataloader, scheduler
+    )
+
     times = {
         "forward": 0,
         "backward": 0,
@@ -194,16 +202,12 @@ def train(args):
     global_step = 0
     
     dummy_enc_states = torch.randn(1, 1, 64).to(device)
-
-    mp_dtype = torch.float16 if args["mixed_precision"] == "fp16" else torch.bfloat16
-    mp_enabled = args["mixed_precision"] is not None
-    scaler = torch.GradScaler(enabled=args["mixed_precision"] == "fp16")
     
     # Training loop
     tik = None
     for epoch in range(args["epochs"]):
         model.train()        
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args['epochs']}")
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args['epochs']}", disable=not accelerator.is_local_main_process)
         for batch in pbar:
             tok = time.time()
             if tik is not None:
@@ -237,7 +241,7 @@ def train(args):
             conditions = torch.randn(bsz, 64).to(device)
             
             # Forward pass
-            with torch.autocast("cuda", dtype=mp_dtype, enabled=mp_enabled):
+            with accelerator.autocast():
                 with Timer("forward", times):
                     conditions = model.condition_mlp(conditions)
                     pred = model(noisy_model_input, 
@@ -259,63 +263,59 @@ def train(args):
             # Backward pass
             optimizer.zero_grad(set_to_none=True)
             with Timer("backward", times):
-                scaler.scale(loss).backward()
+                accelerator.backward(loss)
 
-            # # Unscales the gradients of optimizer's assigned params in-place
-            # scaler.unscale_(optimizer)
-
-            # # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
-            # if args["max_norm"] is not None:
-            #     torch.nn.utils.clip_grad_norm_(model.parameters(), args["max_norm"])
-
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
 
             # scheduler step
             scheduler.step()
 
-            pbar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0], **times)
+            if accelerator.is_local_main_process:
+                pbar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0], **times)
             tik = time.time()
 
-            if args["use_wandb"]:
+            if use_wandb:
                 wandb.log({
                     "loss": loss.item(),
                     "lr": scheduler.get_last_lr()[0],
                     **times
                 })
-            if global_step % args["log_images_every"] == 0:
+            if (global_step % args["log_images_every"] == 0) and accelerator.is_main_process:
+                logging_model = accelerator.unwrap_model(model)
                 with torch.no_grad():
-                    with torch.autocast("cuda", dtype=mp_dtype, enabled=mp_enabled):
+                    with accelerator.autocast():
                         latents = torch.randn(args["sample_batch_size"], 1, 512, 512).to(device)
                         conditions = torch.randn(args["sample_batch_size"], 64).to(device)
-                        conditions = model.condition_mlp(conditions)
+                        conditions = logging_model.condition_mlp(conditions)
 
                         noise_scheduler.set_timesteps(args["diffusion_steps"])
                         for i, t in enumerate(noise_scheduler.timesteps):
-                            pred = model(latents, 
-                                        t/1000, 
-                                        encoder_hidden_states=dummy_enc_states, 
-                                        # timestep_cond=conditions, 
-                                        return_dict=False,
-                                        added_cond_kwargs={"image_embeds": conditions}
-                                        )[0]
+                            pred = logging_model(latents, 
+                                                 t/1000, 
+                                                 encoder_hidden_states=dummy_enc_states, 
+                                                 # timestep_cond=conditions, 
+                                                 return_dict=False,
+                                                 added_cond_kwargs={"image_embeds": conditions}
+                                                 )[0]
                             latents = noise_scheduler.step(pred, t, latents).prev_sample
                         
-                        with torch.autocast("cuda", dtype=torch.float32):
-                            images = latents.float().detach().cpu().numpy().squeeze(1)
-                            images = (images * 127.5 + 127.5).astype(np.uint8)
-                            images = [wandb.Image(Image.fromarray(images[i])) for i in range(images.shape[0])]
+                        images = latents.float().detach().cpu().numpy().squeeze(1)
+                        images = (images * 127.5 + 127.5).astype(np.uint8)
+                        images = [wandb.Image(Image.fromarray(images[i])) for i in range(images.shape[0])]
+                        if use_wandb:
                             wandb.log({"images": images})
 
             global_step += 1
         
         # Save checkpoint
-        if (epoch + 1) % 50 == 0:
+        if (epoch + 1) % 50 == 0 and accelerator.is_main_process:
+            accelerator.wait_for_everyone()
             if not os.path.exists("checkpoints"):   
                 os.makedirs("checkpoints")
+            unwrapped = accelerator.unwrap_model(model)
             torch.save({
                 'epoch': epoch,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': unwrapped.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, f'checkpoints/epoch_{epoch+1}.pt')
 

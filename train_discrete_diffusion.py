@@ -10,10 +10,14 @@ import time
 import wandb 
 import numpy as np
 from PIL import Image
+from models.vae import VAE
+from accelerate import Accelerator
 
 
 def train(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    mp_mode = args.get("mixed_precision") or "no"
+    accelerator = Accelerator(mixed_precision=mp_mode)
+    device = accelerator.device
     
     # Initialize dataset and dataloader
     dataset_cls = FontImageDataset if args["pre_rendered"] else FontDataset
@@ -21,7 +25,8 @@ def train(args):
         dataset = dataset_cls()
     dataloader = DataLoader(dataset, batch_size=args["batch_size"], shuffle=True, num_workers=10, pin_memory=True)
 
-    if args["use_wandb"]:
+    use_wandb = args["use_wandb"] and accelerator.is_main_process
+    if use_wandb:
         wandb.init(project="fonts-vae", config=args)
     
     # Initialize model and optimizer
@@ -49,6 +54,10 @@ def train(args):
         lr_lambda=lambda step: get_lr_lambda(step, warmup_steps, total_steps)
     )
 
+    model, optimizer, dataloader, scheduler = accelerator.prepare(
+        model, optimizer, dataloader, scheduler
+    )
+
     times = {
         "forward": 0,
         "backward": 0,
@@ -56,15 +65,12 @@ def train(args):
     }
 
     global_step = 0
-
-    mp_dtype = torch.float16 if args["mixed_precision"] == "fp16" else torch.bfloat16
-    mp_enabled = args["mixed_precision"] is not None
     
     # Training loop
     tik = None
     for epoch in range(args["epochs"]):
         model.train()        
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args['epochs']}")
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args['epochs']}", disable=not accelerator.is_local_main_process)
         for batch in pbar:
             tok = time.time()
             if tik is not None:
@@ -72,8 +78,9 @@ def train(args):
             images = batch["image"].to(device)
             
             # Forward pass
-            with Timer("forward", times):
-                recon_images, mu, log_var = model(images)
+            with accelerator.autocast():
+                with Timer("forward", times):
+                    recon_images, mu, log_var = model(images)
             
             # loss
             recon = F.mse_loss(recon_images, images, reduction='mean')
@@ -83,16 +90,17 @@ def train(args):
             # Backward pass
             optimizer.zero_grad(set_to_none=True)
             with Timer("backward", times):
-                loss.backward()
+                accelerator.backward(loss)
             optimizer.step()
 
             # scheduler step
             scheduler.step()
 
-            pbar.set_postfix(loss=loss.item(), recon=recon.item(), kl=kl.item(), **times)
+            if accelerator.is_local_main_process:
+                pbar.set_postfix(loss=loss.item(), recon=recon.item(), kl=kl.item(), **times)
             tik = time.time()
 
-            if args["use_wandb"]:
+            if use_wandb:
                 wandb.log({
                     "loss": loss.item(),
                     "recon": recon.item(),
@@ -101,7 +109,7 @@ def train(args):
                     **times
                 })
 
-            if global_step % args["log_images_every"] == 0:
+            if global_step % args["log_images_every"] == 0 and accelerator.is_main_process:
                 # Convert from [-1,1] to [0,255] range and adjust dimensions for wandb
                 # Shape is (batch, channels, height, width) but wandb expects (batch, height, width, channels)
                 recon_np = (recon_images.squeeze(1).detach().cpu().numpy() * 127.5 + 127.5).astype(np.uint8)
@@ -110,17 +118,20 @@ def train(args):
                 recon_pil = [Image.fromarray(recon_np[i]) for i in range(recon_np.shape[0])]
                 images_pil = [Image.fromarray(images_np[i]) for i in range(images_np.shape[0])]
                 
-                wandb.log({
-                    "recon_images": [wandb.Image(img) for img in recon_pil],
-                    "original_images": [wandb.Image(img) for img in images_pil],
-                })
+                if use_wandb:
+                    wandb.log({
+                        "recon_images": [wandb.Image(img) for img in recon_pil],
+                        "original_images": [wandb.Image(img) for img in images_pil],
+                    })
             global_step += 1
         
         # Save checkpoint
-        if (epoch + 1) % 50 == 0:
+        if (epoch + 1) % 50 == 0 and accelerator.is_main_process:
+            accelerator.wait_for_everyone()
+            unwrapped = accelerator.unwrap_model(model)
             torch.save({
                 'epoch': epoch,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': unwrapped.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, f'vae_checkpoint_epoch_{epoch+1}.pt')
 

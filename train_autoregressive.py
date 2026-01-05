@@ -19,6 +19,7 @@ import math
 from copy import deepcopy
 import os
 from models.encoder import Encoder
+from accelerate import Accelerator
 
 
 import torch
@@ -93,7 +94,9 @@ class FontSVGDataset(torch.utils.data.Dataset):
 
 
 def train(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    mp_mode = args.get("mixed_precision") or "no"
+    accelerator = Accelerator(mixed_precision=mp_mode)
+    device = accelerator.device
     
     # Initialize dataset and dataloader
     with TimerWithMessage("Loading dataset...", "Dataset loading"):
@@ -110,7 +113,8 @@ def train(args):
 
     tokenizer, transformer = load_transformer(pos_emb_len=args["pos_emb_len"])
 
-    if args["use_wandb"]:
+    use_wandb = args["use_wandb"] and accelerator.is_main_process
+    if use_wandb:
         wandb.init(project="fonts-autoregressive", config=args)
     
     # Initialize model and optimizer
@@ -143,34 +147,27 @@ def train(args):
     )
 
 
-    # mixed precision
-    mp_dtype = torch.float16 if args["mixed_precision"] == "fp16" else torch.bfloat16
-    mp_enabled = args["mixed_precision"] is not None
-    scaler = torch.GradScaler(enabled=args["mixed_precision"] == "fp16")
-
     # load checkpoint
     global_step = 0
     if args["load_checkpoint"] is not None:
-        checkpoint = torch.load(args["load_checkpoint"])
+        checkpoint = torch.load(args["load_checkpoint"], map_location=device)
         model.load_state_dict(checkpoint["model_state_dict"])
         if "optimizer_state_dict" in checkpoint and checkpoint["optimizer_state_dict"] is not None:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         global_step = checkpoint["global_step"]
-        print(f"Loaded checkpoint from {args['load_checkpoint']}")
+        accelerator.print(f"Loaded checkpoint from {args['load_checkpoint']}")
 
 
     # compiling
     if args["compile_optimizer"]:
-        # optimizer.step = torch.compile(optimizer.step)
-        scaler.step = torch.compile(scaler.step)
-        optimizer.zero_grad = torch.compile(optimizer.zero_grad)
-        grad_clip = torch.compile(torch.nn.utils.clip_grad_norm_)
-    else:
-        grad_clip = torch.nn.utils.clip_grad_norm_
+        accelerator.print("compile_optimizer is not supported when using accelerate and will be ignored.")
     
     if args["compiled"]:
         model.forward = torch.compile(model.forward, dynamic=args["compile_dynamic"])
 
+    model, optimizer, dataloader, scheduler = accelerator.prepare(
+        model, optimizer, dataloader, scheduler
+    )
 
     times = {}
 
@@ -178,7 +175,7 @@ def train(args):
     tik = None
     for epoch in range(args["epochs"]):
         model.train()        
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args['epochs']}")
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args['epochs']}", disable=not accelerator.is_local_main_process)
         for batch in pbar:
             tok = time.time()
             if tik is not None:
@@ -202,100 +199,94 @@ def train(args):
                 raise ValueError("Input too long")
 
             # Forward pass
-            with torch.autocast("cuda", dtype=mp_dtype, enabled=mp_enabled):
+            with accelerator.autocast():
                 with Timer("fwd", times):
                     out = model.transformer(inps) # labels=targs, ignore_index=260
                     logits = model.lm_head(out[0])
 
-            with torch.autocast("cuda", dtype=torch.float32, enabled=True):
-                with Timer("l_time", times):
-                    logits = logits.to(torch.float32)
+            with Timer("l_time", times):
+                logits = logits.to(torch.float32)
 
-                    if args["label_smoothing"]:
-                        # turn targs into one hot
-                        targs_one_hot = torch.zeros_like(logits).scatter_(-1, targs.unsqueeze(-1), 1)
+                if args["label_smoothing"]:
+                    # turn targs into one hot
+                    targs_one_hot = torch.zeros_like(logits).scatter_(-1, targs.unsqueeze(-1), 1)
 
-                        # where we have numbers, apply label smoothing to neighbors
-                        # Create a gaussian kernel for smoothing
-                        sigma = 1.0  # controls spread of the gaussian
-                        window_size = 5  # how many neighbors to consider on each side
-                        x = torch.arange(-window_size, window_size + 1).to(device)
-                        gaussian = torch.exp(-x**2 / (2 * sigma**2))
+                    # where we have numbers, apply label smoothing to neighbors
+                    # Create a gaussian kernel for smoothing
+                    sigma = 1.0  # controls spread of the gaussian
+                    window_size = 5  # how many neighbors to consider on each side
+                    x = torch.arange(-window_size, window_size + 1).to(device)
+                    gaussian = torch.exp(-x**2 / (2 * sigma**2))
 
-                        # Find positions where targets are numbers (0-255)
-                        number_mask = (targs >= 0) & (targs <= 256)
+                    # Find positions where targets are numbers (0-255)
+                    number_mask = (targs >= 0) & (targs <= 256)
+                    
+                    # Initialize smoothed targets - start with the one-hot encoding
+                    smoothed_targs = targs_one_hot.clone()
+                    
+                    # Create indices tensors for each possible offset
+                    B, S = targs.shape  # batch size, sequence length
+                    V = logits.shape[-1]  # vocabulary size
+                    
+                    # Create batch and sequence index tensors for the masked positions
+                    b_indices, s_indices = torch.where(number_mask)
+                    t_values = targs[b_indices, s_indices]  # The actual token values at those positions
+                    
+                    # Create new target distributions for these positions
+                    smoothed_values = torch.zeros((len(b_indices), V), device=device)
+                    
+                    # For each offset, add Gaussian-weighted probability
+                    valid_counts = torch.zeros(len(b_indices), device=device)
+                    
+                    for offset_idx, offset in enumerate(range(-window_size, window_size + 1)):
+                        # Calculate neighbor indices for this offset
+                        neighbor_indices = t_values + offset
                         
-                        # Initialize smoothed targets - start with the one-hot encoding
-                        smoothed_targs = targs_one_hot.clone()
+                        # Check which ones are valid (within vocabulary range)
+                        valid_neighbors = (neighbor_indices >= 0) & (neighbor_indices < V)
                         
-                        # Create indices tensors for each possible offset
-                        B, S = targs.shape  # batch size, sequence length
-                        V = logits.shape[-1]  # vocabulary size
+                        # Add Gaussian weight to valid neighbor positions
+                        weight = gaussian[offset_idx]
                         
-                        # Create batch and sequence index tensors for the masked positions
-                        b_indices, s_indices = torch.where(number_mask)
-                        t_values = targs[b_indices, s_indices]  # The actual token values at those positions
-                        
-                        # Create new target distributions for these positions
-                        smoothed_values = torch.zeros((len(b_indices), V), device=device)
-                        
-                        # For each offset, add Gaussian-weighted probability
-                        valid_counts = torch.zeros(len(b_indices), device=device)
-                        
-                        for offset_idx, offset in enumerate(range(-window_size, window_size + 1)):
-                            # Calculate neighbor indices for this offset
-                            neighbor_indices = t_values + offset
+                        # Use advanced indexing to update only valid neighbors
+                        valid_b_indices = torch.where(valid_neighbors)[0]
+                        if len(valid_b_indices) > 0:
+                            valid_neighbor_indices = neighbor_indices[valid_neighbors]
                             
-                            # Check which ones are valid (within vocabulary range)
-                            valid_neighbors = (neighbor_indices >= 0) & (neighbor_indices < V)
-                            
-                            # Add Gaussian weight to valid neighbor positions
-                            weight = gaussian[offset_idx]
-                            
-                            # Use advanced indexing to update only valid neighbors
-                            valid_b_indices = torch.where(valid_neighbors)[0]
-                            if len(valid_b_indices) > 0:
-                                valid_neighbor_indices = neighbor_indices[valid_neighbors]
-                                
-                                # For each valid position, add the corresponding Gaussian weight
-                                smoothed_values[valid_b_indices, valid_neighbor_indices] += weight
-                                valid_counts[valid_b_indices] += weight
-                        
-                        # Normalize the smoothed distributions
-                        valid_counts = valid_counts.unsqueeze(1)  # Add dimension for broadcasting
-                        smoothed_values = smoothed_values / valid_counts
-                        
-                        # Replace the original one-hot values with smoothed ones for number tokens
-                        smoothed_targs[b_indices, s_indices] = smoothed_values
-                        
-                        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), 
-                                            smoothed_targs.view(-1, smoothed_targs.size(-1)), reduction="none")
-                        
-                        # zero out loss for anywhere index was 260
-                        loss = loss.reshape(*targs.shape)
-                        loss = loss * (targs != 260)
-                        loss = loss.mean()
+                            # For each valid position, add the corresponding Gaussian weight
+                            smoothed_values[valid_b_indices, valid_neighbor_indices] += weight
+                            valid_counts[valid_b_indices] += weight
+                    
+                    # Normalize the smoothed distributions
+                    valid_counts = valid_counts.unsqueeze(1)  # Add dimension for broadcasting
+                    smoothed_values = smoothed_values / valid_counts
+                    
+                    # Replace the original one-hot values with smoothed ones for number tokens
+                    smoothed_targs[b_indices, s_indices] = smoothed_values
+                    
+                    loss = F.cross_entropy(logits.view(-1, logits.size(-1)), 
+                                        smoothed_targs.view(-1, smoothed_targs.size(-1)), reduction="none")
+                    
+                    # zero out loss for anywhere index was 260
+                    loss = loss.reshape(*targs.shape)
+                    loss = loss * (targs != 260)
+                    loss = loss.mean()
 
-                    else:
-                        # Use the smoothed targets for loss calculation
-                        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targs.reshape(-1),ignore_index=260)
+                else:
+                    # Use the smoothed targets for loss calculation
+                    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targs.reshape(-1),ignore_index=260)
 
 
             # Backward pass
             with Timer("bwd", times):
-                scaler.scale(loss).backward()
+                accelerator.backward(loss)
 
-            # # Unscales the gradients of optimizer's assigned params in-place
-            # scaler.unscale_(optimizer)
-
-            # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
+            grad_norm = None
             with Timer("opt", times, enable=False):
-                grad_norm = 0
                 if args["max_norm"] is not None:
-                    grad_norm = grad_clip(model.parameters(), args["max_norm"])
+                    grad_norm = accelerator.clip_grad_norm_(model.parameters(), args["max_norm"])
 
-                scaler.step(optimizer)
-                scaler.update()
+                optimizer.step()
 
                 # scheduler step
                 scheduler.step()
@@ -304,25 +295,28 @@ def train(args):
                 optimizer.zero_grad(set_to_none=True)
 
             with Timer("post", times):
-                pbar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0], grd=grad_norm.item(), **times)
+                if accelerator.is_local_main_process:
+                    grd = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else (grad_norm if grad_norm is not None else 0.0)
+                    pbar.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0], grd=grd, **times)
                 tik = time.time()
 
-                if args["use_wandb"]:
+                if use_wandb:
                     wandb.log({
                         "loss": loss.item(),
                         "lr": scheduler.get_last_lr()[0],
                         **times
                     })
 
-            if global_step % args["log_images_every"] == 0:
+            if (global_step % args["log_images_every"] == 0) and accelerator.is_main_process:
+                logging_model = accelerator.unwrap_model(model)
                 with torch.no_grad():
-                    with torch.autocast("cuda", dtype=mp_dtype, enabled=mp_enabled):
+                    with accelerator.autocast():
                         char_list = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?"
                         start_idx = random.randint(0, len(char_list) - args["num_glyphs"])
                         char = char_list[start_idx]
                         toks = tokenizer(" " + char, return_tensors="pt").input_ids.to(device)
                         toks = toks.repeat(args["sample_batch_size"], 1)
-                        out = model.generate(toks, max_new_tokens=500, do_sample=True, top_p=0.95, top_k=20)
+                        out = logging_model.generate(toks, max_new_tokens=500, do_sample=True, top_p=0.95, top_k=20)
                         out = out.detach().cpu().numpy()
                         out = tokenizer.batch_decode(out, skip_special_tokens=True)
 
@@ -334,19 +328,22 @@ def train(args):
                             for o in out:
                                 img = visualize_commands(string_to_path(o), show=False)
                                 imgs.append(img)
-                            wandb.log({"images": imgs})
+                            if use_wandb:
+                                wandb.log({"images": imgs})
 
 
             global_step += 1
 
             # save checkpoint
-            if global_step % args["save_every"] == 0:
+            if (global_step % args["save_every"] == 0) and accelerator.is_main_process:
+                accelerator.wait_for_everyone()
                 if not os.path.exists("checkpoints"):   
                     os.makedirs("checkpoints")
+                unwrapped = accelerator.unwrap_model(model)
                 torch.save({
                     'epoch': epoch,
                     'global_step': global_step,
-                    'model_state_dict': model.state_dict(),
+                    'model_state_dict': unwrapped.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict() if args["save_optimizer"] else None,
                 }, f'checkpoints/step_{global_step}.pt')
         
